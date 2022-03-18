@@ -1,28 +1,28 @@
 #include <stdio.h>
-#include "./src_tmpl.h"
+#include "./mmkernel.h"
 
 // cnn layer metadata: can be modified as top-kernel args for host control 
 // (except Cin - set as largest Cin in CNN)
-#define Cin 64
-#define Stride 1
+#define CIN 64
+#define STRIDE 1
 #define K_H 1
 #define K_W 1
-#define Cout 128
-#define Inmap_H 16
-#define Inmap_W 16
-#define Fmapo_H INmap_H/L1_Stride
-#define Fmapo_W INmap_W/L1_Stride
+#define COUT 128
+#define INMAP_H 16
+#define INMAP_W 16
+#define FMAPO_H INMAP_H/STRIDE
+#define FMAPO_W INMAP_W/STRIDE
 
 // hardware parameters: cannot be changed for different kernel calls
-#define Cout_UF 32
-#define Fmap_UF 32
+#define COUT_UF 32
+#define FMAP_UF 32
 // #define Wdepth Cout/Cout_UF*Cin*K_H*K_W
 
 // hyper-params for winograd
 #define m 2
 #define r 3
-#define Inmap_H_wino Inmap_H/m
-#define Inmap_W_wino Inmap_W/m
+#define Inmap_H_wino INMAP_H/m
+#define Inmap_W_wino INMAP_W/m
 
 // Fmapo_H*fmapo_W*Cin, Cin*Cout
 
@@ -39,11 +39,12 @@ extern "C" {
         #pragma HLS INTERFACE s_axilite port=return bundle=control
 
 
-        hls::stream<blockvec<Fmap_UF>>   L1_inmap;
-        hls::stream<blockvec<Cout_UF>>  L1_omap;
+        hls::stream<blockvec<FMAP_UF>>   L1_inmap;
+        hls::stream<blockvec<COUT_UF>>  L1_omap;
         // hls::stream<blockvec<Cin>>   skpMap_s;
-        static blockvec<Cout_UF> knl_ram[Cin];
-        #pragma HLS ARRAY_PARTITION variable=knl_ram dim=1 complete
+        static blockvec<COUT_UF> knl_ram[CIN];
+        #pragma HLS ARRAY_PARTITION variable=knl_ram dim=1 complete //Partitions knl_ram into smaller individual elements.
+
         // dtype bneck1_knl_ram[Cin][L2_Cin];   // L1_Cout == L2_Cin
         
 
@@ -61,40 +62,40 @@ extern "C" {
 
         #pragma HLS DATAFLOW
 
-        if (alg_current==0):
+        if (alg_current==0)
         {
-        	round_MM1=Fmapo_H*Fmapo_W/Fmap_UF * (Cout/Cout_UF); //tiles
+        	round_MM1=FMAPO_H*FMAPO_W/FMAP_UF * (COUT/COUT_UF); //tiles
         	round_MM2=1;
-        	AccDim = Cin*K_H*K_W;
+        	AccDim = CIN*K_H*K_W;
         	// loadIn for im2col
 	        // input feature map -> img2col matrix
 	        // no trick here cuz it's just for ordinary convolution
-        	streamInMap<Fmap_UF, Cin, Fmapo_H, Fmapo_W, K_H, K_W>(inMap, L1_inmap);
+        	streamInMap<FMAP_UF, CIN, FMAPO_H, FMAPO_W, K_H, K_W>(inMap, L1_inmap);
         	// loadW for im2col
-        	loadW<Cin, Cout, Cout_UF, K_H, K_W>(knl, knl_ram);
+        	loadW<CIN, COUT, COUT_UF, K_H, K_W>(knl, knl_ram);
         }
 
-        if (alg_current==1): //kn2row needs to be called k^2 times
+        if (alg_current==1) //kn2row needs to be called k^2 times
         {
-        	round_MM1=Fmapo_H*Fmapo_W/Fmap_UF * (Cout/Cout_UF); //tiles
+        	round_MM1=FMAPO_H*FMAPO_W/FMAP_UF * (COUT/COUT_UF); //tiles
         	round_MM2=K_H*K_W; //pad-acc, outer
-        	AccDim = Cin;
+        	AccDim = CIN;
         	// loadW for kn2row
         }
 
 
-        if (alg_current==2): //wino needs to be called (m+r-1)*(m+r-1) times, control from host?
+        if (alg_current==2) //wino needs to be called (m+r-1)*(m+r-1) times, control from host?
         {
         	int round_MM=(m+r-1)*(m+r-1);
-        	AccDim = Cin;
-        	// loadW for wino
+        	AccDim = CIN;
+        	// // loadW for wino
 
-        	// tranform W for wino
-        	void TransformW_wino();
-        	// loadIn for wino
+        	// // tranform W for wino
+        	// void TransformW_wino();
+        	// // loadIn for wino
         	
-        	// tranform Inmap for wino
-        	void TransformIn_wino();
+        	// // tranform Inmap for wino
+        	// void TransformIn_wino();
         }
         
 
@@ -102,24 +103,25 @@ extern "C" {
         // perform conv
 	    for (int i2 = 0; i2 < round_MM2; i2++) {
 	    	for (int i1 = 0; i1 < round_MM1; i1++) {
-	    		matmulcore<Fmap_UF, Cout_UF, AccDim>(L1_inmap, knl_ram, L1_omap);
-	    		if (alg_current==1):
+	    		matmulcore<FMAP_UF, COUT_UF, AccDim>(L1_inmap, knl_ram, L1_omap);
+	    		if (alg_current==1){
 	    			// note: change this to support different values of K_H,k_W, o_h, o_w. also chaneg to support
 	    			// cout aggregated output layout
 	    			// itr1 should be i2/Fmap_UF, itr2 should be i2%Fmap_UF?
-	    			padacc<Stride, K_H, Fmapo_H, 1, 1, i1>(hls::stream<blockvec_Out_P> Inrows[n],hls::stream<blockvec_Out_P> &outpipe)
+	    			padacc<STRIDE, K_H, FMAPO_H, 1, 1, i1>(L1_omap,L1_omap);
+				}
 	    	}
 	    }
 
         // Task 2:
         // store result back to RAM
         // store<L3_Cout,Fmap_H,Fmap_W>(outMap, rslt_s);
-    	if (alg_current==0 or alg_current==1){
-    		storeDDR<int Cout, int Cout_UF, int AccDim, int Fmapo_H, int Fmapo_W>(outMap, L1_omap);
+    	if (alg_current==0 || alg_current==1){
+    		storeDDR<COUT, COUT_UF, AccDim, FMAPO_H, FMAPO_W>(outMap, L1_omap);
     	}
     	if (alg_current==2){
-			TransformOut_wino(/*...*/);
-			storeDDR_wino(/*...*/);
+			// TransformOut_wino(/*...*/);
+			// storeDDR_wino(/*...*/);
     	}
         // ------------------------------------------------------------------------- //
 
@@ -127,19 +129,19 @@ extern "C" {
 }
 
 // Usually, Aggf = Fmap_UF
-template<int Aggf, int Cin, int Height, int Width, int K_H, int K_W>
-void streamInMap(const dtype inMap[], hls::stream<blockvec<Cout>> outMap) {
+template<int Aggf, int Cin, int Height, int Width, int K_H_t, int K_W_t>
+void streamInMap(const dtype inMap[], hls::stream<blockvec<Aggf>> &outMap) {
     for (int h = 0; h < Height; h++) {
     	for (int w = 0; w < Width; w++) {
-    		for (int k1 = 0; k1 < K_H; k1++){
-    			for (int k2 = 0; k2 < K_W; k2++){
+    		for (int k1 = 0; k1 < K_H_t; k1++){
+    			for (int k2 = 0; k2 < K_W_t; k2++){
 		    		for (int p2 = 0; p2 < Cin/Aggf; p2++) {
 		    			#pragma HLS PIPELINE 
-				        map_blockvec<Aggf> tempA;
+				        blockvec<Aggf> tempA;
 				        #pragma HLS aggregate variable=tempA
-				        loadIn_3 : for (int pf = 0; pf < Aggf; pf++) {
+				        for (int pf = 0; pf < Aggf; pf++) {
 				              
-				            tempA.d[pf] = inMap[((h+k1)*Inmap_W+w+k2)*Cin+p2*Aggf+pf];
+				            tempA.d[pf] = inMap[((h+k1)*INMAP_W+w+k2)*Cin+p2*Aggf+pf];
 				        }
 				        outMap.write(tempA);
 		    		}    				
@@ -151,16 +153,16 @@ void streamInMap(const dtype inMap[], hls::stream<blockvec<Cout>> outMap) {
 
 
 // Assume W bvs in col major order - K2, Cin, Cout
-template<int Cin, int Cout, int Cout_UF, int K_H, int K_W>
+template<int Cin, int Cout, int Cout_UF, int K_H_t, int K_W_t>
 void loadW(const dtype W[], blockvec<Cout_UF> Wcols[]){
 	#pragma HLS aggregate variable=W
 	#pragma HLS aggregate variable=Wcols
 
-	for (int k=0; k<K_H*K_W; k++){
+	for (int k=0; k<K_H_t*K_W_t; k++){
 		for (int i=0; i<Cin; i++){
 			for (int o=0; o<Cout/Cout_UF; o++){
 				#pragma HLS PIPELINE 
-				map_blockvec<Cout_UF> tempA;
+				blockvec<Cout_UF> tempA;
 				#pragma HLS aggregate variable=tempA
 				for (int o2=0; o2<Cout_UF; o2++){
 					tempA.d[o2] = W[(k*Cin*Cout)+i*Cout+o*Cout_UF+o2];
@@ -188,21 +190,21 @@ void storeDDR(dtype C[], hls::stream<blockvec<Cout_UF>> &outpipe){
 	
 }
 
-void TransformIn_wino(){
-	// RAISE NOT IMPLEMENTED
-}
+// void TransformIn_wino(){
+// 	// RAISE NOT IMPLEMENTED
+// }
 
-void TransformW_wino(){
-	// RAISE NOT IMPLEMENTED
-}
+// void TransformW_wino(){
+// 	// RAISE NOT IMPLEMENTED
+// }
 
-void TransformOut_wino(){
-	// RAISE NOT IMPLEMENTED
-}
+// void TransformOut_wino(){
+// 	// RAISE NOT IMPLEMENTED
+// }
 
-void storeDDR_wino(dtype C[], hls::stream<blockvec<Cout_UF>> &outpipe /*m,r*/){
-	// RAISE NOT IMPLEMENTED
-}
+// void storeDDR_wino(dtype C[], hls::stream<blockvec<Cout_UF>> &outpipe /*m,r*/){
+// 	// RAISE NOT IMPLEMENTED
+// }
 
 //Inrows: co blockvecs (each size Pa)
 //Wcols: co wblockvecs (each size Ta)
@@ -210,7 +212,7 @@ void storeDDR_wino(dtype C[], hls::stream<blockvec<Cout_UF>> &outpipe /*m,r*/){
 //input fmap: [o^2,Cout] broadcast
 //weights: [Cout,Cin]
 template<int Fmap_UF, int Cout_UF, int AccDim>
-void matmulcore(hls::stream<blockvec<Fmap_UF>> &Inrows, blockvec<Cout_UF> Wcols[], hls::stream<blockvec<Cout_UF>> &Crows) {
+void matmulcore(hls::stream<blockvec<FMAP_UF>> &Inrows, blockvec<COUT_UF> Wcols[], hls::stream<blockvec<COUT_UF>> &Crows) {
 #pragma HLS aggregate variable=Inrows
 #pragma HLS aggregate variable=Wcols
 #pragma HLS aggregate variable=Crows
@@ -254,18 +256,15 @@ void matmulcore(hls::stream<blockvec<Fmap_UF>> &Inrows, blockvec<Cout_UF> Wcols[
 			blockvec<Cout_UF> tempC;
 			#pragma HLS aggregate variable=tempC
 				
-				for(int jj = 0; jj < Cout_UF; jj++) {
-					int tmp_c=C[ii][jj];
-					// =(tmp_c>0)?tmp_c:0;
-					// tempC.a[i*P+ii]=C[i][j][ii][jj];
-					//relu activation implemented
-
-					tempC.a[ii]=(tmp_c>0)?tmp_c: 0;
-				}
+			for(int jj = 0; jj < Cout_UF; jj++) {
+				int tmp_c=C[ii][jj];
+				// =(tmp_c>0)?tmp_c:0;
+				// tempC.a[i*P+ii]=C[i][j][ii][jj];
+				//relu activation implemented
+				tempC.a[ii]=(tmp_c>0)?tmp_c: 0;
 			}
 			Crows.write(tempC);
-		
-	
+		}		
 }
 
 
@@ -283,10 +282,10 @@ void matmulcore(hls::stream<blockvec<Fmap_UF>> &Inrows, blockvec<Cout_UF> Wcols[
 // a,b ranges:0~K-1
 //0<=ii,jj<O, cut by Pa & identified by Pa&it1. ii*O+jj=it1*Pa+kk
 template<int S, int K, int O, int it1, int it2, int itk>
-void padacc(hls::stream<blockvec_Out_P> Inrows[n],hls::stream<blockvec_Out_P> &outpipe){
+void padacc(hls::stream<blockvec<COUT_UF>> &Inrows,hls::stream<blockvec<COUT_UF>> &outpipe){
 #pragma HLS aggregate variable=Inrows
-	blockvec_Out_P tempO2buffer[n][Ta];
-	blockvec_Out_P tmp[n];
+	blockvec<COUT_UF> tempO2buffer[n][Ta];
+	blockvec<COUT_UF> tmp[n];
 	#pragma HLS ARRAY_PARTITION variable=tempO2buffer dim=0 complete
 	#pragma HLS ARRAY_PARTITION variable=tmp dim=0 complete
 	#pragma HLS aggregate variable=tempO2buffer
@@ -308,7 +307,7 @@ void padacc(hls::stream<blockvec_Out_P> Inrows[n],hls::stream<blockvec_Out_P> &o
 		#pragma HLS PIPELINE
 		for (int i = 0; i < n; i++){
 			#pragma HLS UNROLL
-			tmp[i]=Inrows[i].read();
+			tmp[i]=Inrows.read();
 			tempO2buffer[i][j] = tmp[i];
 		}
 	}
@@ -338,7 +337,7 @@ void padacc(hls::stream<blockvec_Out_P> Inrows[n],hls::stream<blockvec_Out_P> &o
 		// storeDDR(C, scratchpad, 0,it2); //it1 not useful
 		outPipeH1Loop:for (int j = 0; j < H; j++){
 			#pragma HLS pipeline II=1
-			blockvec_Out_P tmp [Ta*H/Pa]; //total size=(H/Pa)*Pa*Ta=H*Ta
+			blockvec<Cout_UF> tmp [Ta*H/Pa]; //total size=(H/Pa)*Pa*Ta=H*Ta
 			#pragma HLS ARRAY_PARTITION variable=tmp dim=1 complete
 			#pragma HLS bind_storage variable=tmp type=RAM_1P impl=uram
 			for (int i = 0; i < Ta; i++){
@@ -356,7 +355,6 @@ void padacc(hls::stream<blockvec_Out_P> Inrows[n],hls::stream<blockvec_Out_P> &o
 		}
 	}
 }
-
 
 
 

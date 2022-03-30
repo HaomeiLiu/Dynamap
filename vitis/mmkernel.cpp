@@ -7,11 +7,13 @@
 #define STRIDE 1
 #define K_H 1
 #define K_W 1
+#define K_BOUND K_H*K_W
 #define COUT 128
 #define INMAP_H 16
 #define INMAP_W 16
 #define FMAPO_H INMAP_H/STRIDE
 #define FMAPO_W INMAP_W/STRIDE
+#define O_2 FMAPO_H*FMAPO_W
 
 // hardware parameters: cannot be changed for different kernel calls
 #define COUT_UF 32
@@ -27,6 +29,8 @@
 // Fmapo_H*fmapo_W*Cin, Cin*Cout
 
 // ALG_encode: 0-im2col; 1-kn2row; 2-winograd
+//inMap - horizontal
+//knl_ram - vertical 
 extern "C" {
     void top_kernel(dtype *inMap,  dtype *knl, dtype* outMap, ALG_encode alg_last, ALG_encode alg_current,ALG_encode alg_next) {              
 
@@ -36,13 +40,17 @@ extern "C" {
         #pragma HLS INTERFACE s_axilite port=knl bundle=control
         #pragma HLS INTERFACE m_axi port=outMap bundle=gmem2 offset=slave
         #pragma HLS INTERFACE s_axilite port=outMap bundle=control
+
+		#pragma HLS INTERFACE s_axilite port=alg_last bundle=control
+		#pragma HLS INTERFACE s_axilite port=alg_current bundle=control
+		#pragma HLS INTERFACE s_axilite port=alg_next bundle=control
         #pragma HLS INTERFACE s_axilite port=return bundle=control
 
 
         hls::stream<blockvec<FMAP_UF>>   L1_inmap;
         hls::stream<blockvec<COUT_UF>>  L1_omap;
         // hls::stream<blockvec<Cin>>   skpMap_s;
-        static blockvec<COUT_UF> knl_ram[CIN];
+        blockvec<COUT_UF> knl_ram[CIN];
         #pragma HLS ARRAY_PARTITION variable=knl_ram dim=1 complete //Partitions knl_ram into smaller individual elements.
 
         // dtype bneck1_knl_ram[Cin][L2_Cin];   // L1_Cout == L2_Cin
@@ -103,12 +111,12 @@ extern "C" {
         // perform conv
 	    for (int i2 = 0; i2 < round_MM2; i2++) {
 	    	for (int i1 = 0; i1 < round_MM1; i1++) {
-	    		matmulcore<FMAP_UF, COUT_UF, AccDim>(L1_inmap, knl_ram, L1_omap);
+	    		matmulcore<FMAP_UF, COUT_UF>(L1_inmap, knl_ram, L1_omap, AccDim);
 	    		if (alg_current==1){
 	    			// note: change this to support different values of K_H,k_W, o_h, o_w. also chaneg to support
 	    			// cout aggregated output layout
 	    			// itr1 should be i2/Fmap_UF, itr2 should be i2%Fmap_UF?
-	    			padacc<STRIDE, K_H, FMAPO_H, 1, 1, i1>(L1_omap,L1_omap);
+	    			padacc<COUT_UF, STRIDE, K_H, FMAPO_H, 1, 1>(L1_omap,L1_omap,i1);
 				}
 	    	}
 	    }
@@ -117,7 +125,7 @@ extern "C" {
         // store result back to RAM
         // store<L3_Cout,Fmap_H,Fmap_W>(outMap, rslt_s);
     	if (alg_current==0 || alg_current==1){
-    		storeDDR<COUT, COUT_UF, AccDim, FMAPO_H, FMAPO_W>(outMap, L1_omap);
+    		storeDDR<COUT, COUT_UF, FMAPO_H, FMAPO_W>(outMap, L1_omap);
     	}
     	if (alg_current==2){
 			// TransformOut_wino(/*...*/);
@@ -167,13 +175,15 @@ void loadW(const dtype W[], blockvec<Cout_UF> Wcols[]){
 				for (int o2=0; o2<Cout_UF; o2++){
 					tempA.d[o2] = W[(k*Cin*Cout)+i*Cout+o*Cout_UF+o2];
 				}
-				Wcols[i].write[tempA];
+				//ERROR
+				Wcols[i]=tempA;
 			}
 		}
 	}
 }
 
-template<int Cout, int Cout_UF, int AccDim, int Fmapo_H, int Fmapo_W>
+//ERROR
+template<int Cout, int Cout_UF, int Fmapo_H, int Fmapo_W>
 void storeDDR(dtype C[], hls::stream<blockvec<Cout_UF>> &outpipe){
 #pragma HLS aggregate variable=C
 	// int hpal=(H/Pa<1)?1:H/Pa;
@@ -183,7 +193,7 @@ void storeDDR(dtype C[], hls::stream<blockvec<Cout_UF>> &outpipe){
 			for (int ii = 0; ii < Cout_UF; ii++){
 				#pragma HLS PIPELINE
 				blockvec<Cout_UF> temp=outpipe.read();
-				C[j*Cout+i*Cout_UF+ii] = temp[ii];
+				C[j*Cout+i*Cout_UF+ii] = temp.d[ii];
 			}
 		}
 	}
@@ -211,8 +221,9 @@ void storeDDR(dtype C[], hls::stream<blockvec<Cout_UF>> &outpipe){
 //Crows: Ta blockvecs (each size Pa)
 //input fmap: [o^2,Cout] broadcast
 //weights: [Cout,Cin]
-template<int Fmap_UF, int Cout_UF, int AccDim>
-void matmulcore(hls::stream<blockvec<FMAP_UF>> &Inrows, blockvec<COUT_UF> Wcols[], hls::stream<blockvec<COUT_UF>> &Crows) {
+//ERROR
+template<int Fmap_UF, int Cout_UF>
+void matmulcore(hls::stream<blockvec<FMAP_UF>> &Inrows, blockvec<COUT_UF> Wcols[], hls::stream<blockvec<COUT_UF>> &Crows, int AccDim) {
 #pragma HLS aggregate variable=Inrows
 #pragma HLS aggregate variable=Wcols
 #pragma HLS aggregate variable=Crows
@@ -281,8 +292,13 @@ void matmulcore(hls::stream<blockvec<FMAP_UF>> &Inrows, blockvec<COUT_UF> Wcols[
 // kernel y output bar[ii][jj] goes to scratchpad[K-1-a+ii*S][K-1-b+jj*S] 
 // a,b ranges:0~K-1
 //0<=ii,jj<O, cut by Pa & identified by Pa&it1. ii*O+jj=it1*Pa+kk
-template<int S, int K, int O, int it1, int it2, int itk>
-void padacc(hls::stream<blockvec<COUT_UF>> &Inrows,hls::stream<blockvec<COUT_UF>> &outpipe){
+//ERROR
+template<int Cout_UF, int S, int K, int O, int it1, int it2>
+void padacc(hls::stream<blockvec<COUT_UF>> &Inrows,hls::stream<blockvec<COUT_UF>> &outpipe,int itk){
+	int Ta = 16;
+	int Pa = 16;
+	int n=1;
+	int H = 224;
 #pragma HLS aggregate variable=Inrows
 	blockvec<COUT_UF> tempO2buffer[n][Ta];
 	blockvec<COUT_UF> tmp[n];
@@ -329,15 +345,15 @@ void padacc(hls::stream<blockvec<COUT_UF>> &Inrows,hls::stream<blockvec<COUT_UF>
 				#pragma HLS dependence array variable=scratchpad inter false
 				int ind1=K-1-a+ii*S;
 				int ind2=K-1-b+jj*S;
-				scratchpad[ind1][ind2][j] = (it1==0 && itk==0) ? 0:scratchpad[ind1][ind2][j]+tempO2buffer[i][j].a[kk];
+				scratchpad[ind1][ind2][j] = (it1==0 && itk==0) ? 0:scratchpad[ind1][ind2][j]+int(tempO2buffer[i][j].d[kk]);
 			}
 		}
 	}
-	if (itk==k_bound-1 && it1==O2/Pa-1){
+	if (itk==K_BOUND-1 && it1==O_2/Pa-1){
 		// storeDDR(C, scratchpad, 0,it2); //it1 not useful
 		outPipeH1Loop:for (int j = 0; j < H; j++){
 			#pragma HLS pipeline II=1
-			blockvec<Cout_UF> tmp [Ta*H/Pa]; //total size=(H/Pa)*Pa*Ta=H*Ta
+			blockvec<COUT_UF> tmp [Ta*H/Pa]; //total size=(H/Pa)*Pa*Ta=H*Ta
 			#pragma HLS ARRAY_PARTITION variable=tmp dim=1 complete
 			#pragma HLS bind_storage variable=tmp type=RAM_1P impl=uram
 			for (int i = 0; i < Ta; i++){
@@ -345,7 +361,7 @@ void padacc(hls::stream<blockvec<COUT_UF>> &Inrows,hls::stream<blockvec<COUT_UF>
 					// #pragma HLS UNROLL
 					int i1=k/Pa;
 					int i2=k%Pa;
-					tmp[i*H/Pa+i1].a[i2]=scratchpad[j][k][i];
+					tmp[i*H/Pa+i1].d[i2]=scratchpad[j][k][i];
 				}
 			}
 			outPipeLoop:for (int i = 0; i < Ta*H/Pa; i++){

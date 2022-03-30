@@ -37,14 +37,14 @@ void streamInMap(const dtype inMap[], hls::stream<blockvec<Aggf>> &outMap);
 template<int Cin, int Cout, int Cout_UF, int K_H_t, int K_W_t>
 void loadW(const dtype W[], blockvec<Cout_UF> Wcols[]);
 
-template<int Cout, int Cout_UF, int AccDim, int Fmapo_H, int Fmapo_W>
+template<int Cout, int Cout_UF, int Fmapo_H, int Fmapo_W>
 void storeDDR(dtype C[], hls::stream<blockvec<Cout_UF>> &outpipe);
 
-template<int Fmap_UF, int Cout_UF, int AccDim>
-void matmulcore(hls::stream<blockvec<Fmap_UF>> &Inrows, blockvec<Cout_UF> Wcols[], hls::stream<blockvec<Cout_UF>> &Crows);
+template<int Fmap_UF, int Cout_UF>
+void matmulcore(hls::stream<blockvec<Fmap_UF>> &Inrows, blockvec<Cout_UF> Wcols[], hls::stream<blockvec<Cout_UF>> &Crows, int AccDim);
 
-template<int Cout_UF, int S, int K, int O, int it1, int it2, int itk>
-void padacc(hls::stream<blockvec<Cout_UF>> &Inrows,hls::stream<blockvec<Cout_UF>> &outpipe);
+template<int Cout_UF, int S, int K, int O, int it1, int it2>
+void padacc(hls::stream<blockvec<Cout_UF>> &Inrows,hls::stream<blockvec<Cout_UF>> &outpipe, int itk);
 
 // void TransformIn_wino();
 

@@ -4,509 +4,225 @@
 #define CL_HPP_ENABLE_PROGRAM_CONSTRUCTION_FROM_ARRAY_COMPATIBILITY 1
 #define CL_USE_DEPRECATED_OPENCL_1_2_APIS
 
-// #define L1 8 
-
-//L1
-// #define L1 8 //L1
-// #define L2 64 //L2
-// #define L3 4 //L3
+#define DATA_SIZE 4096
 
 #include <vector>
-#include <CL/cl2.hpp>
-
-
+#include <unistd.h>
 #include <iostream>
 #include <fstream>
-#include <CL/cl_ext_xilinx.h>
-#include <unistd.h>
-#include <limits.h>
-#include <sys/stat.h>
-#include <stdio.h>
-#include <ap_int.h>
-#include <cstdlib>
-#include <ctime>
-#include <iterator>
-#include <string>
-#include <cfloat>
-#include <CL/cl_ext.h>
+#include <CL/cl2.hpp>
+#include "ap_int.h"
 
 
-#include "./topQ_new.h"
-#include "./rmm.h"
+#include "mmkernel.h"
 
-using namespace std;
+typedef ap_int<16> dtype;
 
+//mmkernel defined constants
+#define CIN 64
+#define STRIDE 1
+#define K_H 1
+#define K_W 1
+#define K_BOUND K_H*K_W
+#define COUT 128
+#define INMAP_H 16
+#define INMAP_W 16
+#define FMAPO_H INMAP_H/STRIDE
+#define FMAPO_W INMAP_W/STRIDE
+#define O_2 FMAPO_H*FMAPO_W
 
+// hardware parameters: cannot be changed for different kernel calls
+// UF: unroll factor
+#define COUT_UF 32
+#define FMAP_UF 32
+// #define Wdepth Cout/Cout_UF*Cin*K_H*K_W
 
-// function for aligning the address
+// hyper-params for winograd
+#define m 2
+#define r 3
+#define Inmap_H_wino INMAP_H/m
+#define Inmap_W_wino INMAP_W/m
 
-
-template <typename Tour>
-struct aligned_allocator
-{
-  using value_type = Tour;
-  Tour* allocate(std::size_t num)
-  {
-    void* ptr = nullptr;
-    if (posix_memalign(&ptr,4096,num*sizeof(Tour)))
-      throw std::bad_alloc();
-    return reinterpret_cast<Tour*>(ptr);
-  }
-  void deallocate(Tour* p, std::size_t num)
-  {
-    free(p);
-  }
-};
-
-
-#define OCL_CHECK(error,call)                                       \
-    call;                                                           \
-    if (error != CL_SUCCESS) {                                      \
-      printf("%s:%d Error calling " #call ", error code is: %d\n",  \
-              __FILE__,__LINE__, error);                            \
-      exit(EXIT_FAILURE);                                           \
-    }                                   
-
-namespace xcl {
-
-
-std::vector<cl::Device> get_devices(const std::string& vendor_name) {
-
-    size_t i;
-    cl_int err;
-    std::vector<cl::Platform> platforms;
-    OCL_CHECK(err, err = cl::Platform::get(&platforms));
-    cl::Platform platform;
-    for (i  = 0 ; i < platforms.size(); i++){
-        platform = platforms[i];
-        OCL_CHECK(err, std::string platformName = platform.getInfo<CL_PLATFORM_NAME>(&err));
-        if (platformName == vendor_name){
-            std::cout << "Found Platform" << std::endl;
-            std::cout << "Platform Name: " << platformName.c_str() << std::endl;
-            break;
-        }
-    }
-    if (i == platforms.size()) {
-        std::cout << "Error: Failed to find Xilinx platform" << std::endl;
-        exit(EXIT_FAILURE);
-    }
-   
-    //Getting ACCELERATOR Devices and selecting 1st such device 
-    std::vector<cl::Device> devices;
-    OCL_CHECK(err, err = platform.getDevices(CL_DEVICE_TYPE_ACCELERATOR, &devices));
-    return devices;
-}
-
-
+// Forward declaration of utility functions included at the end of this file
 std::vector<cl::Device> get_xilinx_devices();
+char *read_binary_file(const std::string &xclbin_file_name, unsigned &nb);
 
-std::vector<cl::Device> get_xil_devices() {return get_devices("Xilinx");}
-
-char* read_binary_file(const std::string &xclbin_file_name, unsigned &nb);
-}
-
-
-
-
-
-
-
-
-
-
-
-int main(int argc, char ** argv){
-
-      cl_int err;
-    std::string binaryFile = (argc != 2) ? "./top.xclbin" : argv[1];
+// ------------------------------------------------------------------------------------
+// Main program
+// ------------------------------------------------------------------------------------
+int main(int argc, char **argv)
+{
+    // ------------------------------------------------------------------------------------
+    // Step 1: Initialize the OpenCL environment
+    // ------------------------------------------------------------------------------------
+    cl_int err;
+    std::string binaryFile = (argc != 2) ? "mmkernel.xclbin" : argv[1];
     unsigned fileBufSize;
-    std::vector<cl::Device> devices = xcl::get_xilinx_devices();
-    //devices.resize(1);
-    cl::Device device = devices[0];
-
-    OCL_CHECK(err, std::string device_name = device.getInfo<CL_DEVICE_NAME>(&err));
-
-
-    // std::cout << "the device info is" << device_name;
+    std::vector<cl::Device> devices = get_xilinx_devices();
     devices.resize(1);
-
-
-
-
-    OCL_CHECK(err, cl::Context context(device, NULL, NULL, NULL, &err));
-
-    char *fileBuf = xcl::read_binary_file(binaryFile, fileBufSize);
-
-    cout << "the size of buff is" << *fileBuf  << endl;
-
+    cl::Device device = devices[0];
+    cl::Context context(device, NULL, NULL, NULL, &err);
+    char *fileBuf = read_binary_file(binaryFile, fileBufSize);
     cl::Program::Binaries bins{{fileBuf, fileBufSize}};
+    cl::Program program(context, devices, bins, NULL, &err);
+    cl::CommandQueue q(context, device, CL_QUEUE_PROFILING_ENABLE, &err);
+    cl::Kernel krnl_matrix_mult(program, "top_kernel", &err);
 
-    OCL_CHECK(err, cl::Program program(context, devices, bins, NULL, &err));
-    
-    // OCL_CHECK(err, cl::CommandQueue q(context, device, CL_QUEUE_PROFILING_ENABLE | CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE, &err));
-    OCL_CHECK(err, cl::CommandQueue q(context, device, CL_QUEUE_PROFILING_ENABLE, &err));
-    
-
-
-
-    // cl::CommandQueue q(context, device, CL_QUEUE_PROFILING_ENABLE , &err);
-
-    // ===============================================Q==============================================
-
-    std::vector<float, aligned_allocator<float>> In_rows;
-    In_rows.resize(L1_pi*BATCHS);
-
-    std::vector<float, aligned_allocator<float>> In_rows_snt;
-    In_rows_snt.resize(L1_pi*BATCHS);
-
-
-    std::vector<float, aligned_allocator<float>> In_actions;
-    In_actions.resize(L3_pi*BATCHS);
-
-    std::vector<float, aligned_allocator<float>> In_rewards;
-    In_rewards.resize(BATCHS);
-
-    std::vector<int, aligned_allocator<int>> In_dones;
-    In_dones.resize(BATCHS);
-
-    std::vector<float, aligned_allocator<float>> Out_Q;
-    Out_Q.resize(BATCHS);
-
-    std::vector<float, aligned_allocator<float>> Out_Loss;
-    Out_Loss.resize(BATCHS);
-
-    // ===============================================Pi==============================================
-
-    std::vector<float, aligned_allocator<float>> In_rows_pi;
-    In_rows_pi.resize(L1_pi*BATCHS);
-
-    std::vector<w1blockvec, aligned_allocator<w1blockvec>> Out_w1bram;
-    Out_w1bram.resize(L1_pi);
-
-    std::vector<Piw2blockvec, aligned_allocator<Piw2blockvec>> Out_w2bram;
-    Out_w2bram.resize(L2);
-
-
-    std::vector<float, aligned_allocator<float>> Out_bias1;
-    Out_bias1.resize(L2);
-
-    std::vector<float, aligned_allocator<float>> Out_bias2;
-    Out_bias2.resize(L3_pi);
-
-
-
-    int i, j, jj;
-
-
-    std::cout << "Host: init input states/actions..." << std::endl;
-    printf("\nHost: input s content:\n");
-    
-    for (jj = 0; jj < BATCHS; jj++) {   
-        for (j = 0; j < L1_pi; j++) {
-            // for (i = 0; i < BSIZE; i++) {
-            In_rows[L1_pi*jj+j] = float(-j)/float(4.0)+jj;
-            In_rows_snt[L1_pi*jj+j] = float(jj)/float(4.0);
-            printf("%f ",In_rows[j]);
-            // printf("%f ",In_rows_snt[j].a[i]);
-            // }
-        }
-        printf("\n");
-    }
-
-    printf("\nHost: input acts content:\n");
-    for (jj = 0; jj < BATCHS; jj++) {   
-        for (j = 0; j < L3_pi; j++) {
-            // for (i = 0; i < BSIZE; i++) {
-            if(jj%2==0)In_actions[L3_pi*jj+j] = float(2)+j;
-            else In_actions[L3_pi*jj+j] = float(1)-j;
-            printf("%f ",In_actions[L3_pi*jj+j]);
-            // printf("%f ",In_rows_snt[j].a[i]);
-            // }
-        }
-        printf("\n");
-    }
-
-    printf("\nHost: Init input reward/done content...\n");
-
-    for (jj = 0; jj < BATCHS; jj++) {   
-        // for (i = 0; i < BSIZE; i++) {
-        // printf("\njj,i:%d,%d\n",jj,i);
-
-            In_rewards[jj] = float(1);
-            In_dones[jj] = int(0);
-            
-        // }
-    }
-    
-    std::vector<int, aligned_allocator<int>> insert_ind;
-    insert_ind.resize(insert_batch);
-    std::vector<float, aligned_allocator<float>> init_priority;
-    init_priority.resize(insert_batch);
-    std::vector<int, aligned_allocator<int>> ind_o_out;
-    ind_o_out.resize(N_learner);
-
-    printf("\nHost: Init replay insert inputs...\n");
-    for (i = 0; i < insert_batch; i++) {
-        // printf("\njj,i:%d,%d\n",jj,i);
-        insert_ind[i] = i;
-        init_priority[i] = i+1;
-        // printf("%f ",In_actions[jj].a[i]);
-    }
-    
-    cl_mem_ext_ptr_t InqExt1;
-    cl_mem_ext_ptr_t InqExt2;
-    cl_mem_ext_ptr_t InqExt3;
-    cl_mem_ext_ptr_t InqExt4;
-    cl_mem_ext_ptr_t InqExt5;
-    cl_mem_ext_ptr_t OutqExt1;
-    cl_mem_ext_ptr_t OutqExt2;
-
-    InqExt1.obj = In_rows.data();
-    InqExt1.param = 0;
-    InqExt1.banks = XCL_MEM_DDR_BANK0;
-    InqExt1.flags = XCL_MEM_DDR_BANK0;
-
-    InqExt2.obj = In_rows_snt.data();
-    InqExt2.param = 0;
-    InqExt2.banks = XCL_MEM_DDR_BANK0;
-    InqExt2.flags = XCL_MEM_DDR_BANK0;
-
-    InqExt3.obj = In_actions.data();
-    InqExt3.param = 0;
-    InqExt3.banks = XCL_MEM_DDR_BANK0;
-    InqExt3.flags = XCL_MEM_DDR_BANK0;
-
-    InqExt4.obj = In_rewards.data();
-    InqExt4.param = 0;
-    InqExt4.banks = XCL_MEM_DDR_BANK0;
-    InqExt4.flags = XCL_MEM_DDR_BANK0;
-
-    InqExt5.obj = In_dones.data();
-    InqExt5.param = 0;
-    InqExt5.banks = XCL_MEM_DDR_BANK0;
-    InqExt5.flags = XCL_MEM_DDR_BANK0;
-
-    OutqExt1.obj = Out_Q.data();
-    OutqExt1.param = 0;
-    OutqExt1.banks = XCL_MEM_DDR_BANK0;
-    OutqExt1.flags = XCL_MEM_DDR_BANK0;
-
-    OutqExt2.obj = Out_Loss.data();
-    OutqExt2.param = 0;
-    OutqExt2.banks = XCL_MEM_DDR_BANK0;
-    OutqExt2.flags = XCL_MEM_DDR_BANK0;
-
-
-    cl_mem_ext_ptr_t InpiExt1;
-    cl_mem_ext_ptr_t OutpiExt1;
-    cl_mem_ext_ptr_t OutpiExt2;
-    cl_mem_ext_ptr_t OutpiExt3;
-    cl_mem_ext_ptr_t OutpiExt4;
-
-
-    InpiExt1.obj = In_rows.data();
-    InpiExt1.param = 0;
-    InpiExt1.banks = XCL_MEM_DDR_BANK3;
-    InpiExt1.flags = XCL_MEM_DDR_BANK3;
-
-    OutpiExt1.obj = Out_w1bram.data();
-    OutpiExt1.param = 0;
-    OutpiExt1.banks = XCL_MEM_DDR_BANK3;
-    OutpiExt1.flags = XCL_MEM_DDR_BANK3;
-
-    OutpiExt2.obj = Out_w2bram.data();
-    OutpiExt2.param = 0;
-    OutpiExt2.banks = XCL_MEM_DDR_BANK3;
-    OutpiExt2.flags = XCL_MEM_DDR_BANK3;
-
-    OutpiExt3.obj = Out_bias1.data();
-    OutpiExt3.param = 0;
-    OutpiExt3.banks = XCL_MEM_DDR_BANK3;
-    OutpiExt3.flags = XCL_MEM_DDR_BANK3;
-
-    OutpiExt4.obj = Out_bias2.data();
-    OutpiExt4.param = 0;
-    OutpiExt4.banks = XCL_MEM_DDR_BANK3;
-    OutpiExt4.flags = XCL_MEM_DDR_BANK3;
-
-
-
-
-    // ========================replay=====================
-    
-    cl_mem_ext_ptr_t RepInExt1;
-    cl_mem_ext_ptr_t RepInExt2;
-    cl_mem_ext_ptr_t RepoutExt; //for output
-    
-
-    RepInExt1.obj = insert_ind.data();
-    RepInExt1.param = 0;
-    RepInExt1.flags = 1|XCL_MEM_TOPOLOGY;
-
-    RepInExt2.obj = init_priority.data();
-    RepInExt2.param = 0;
-    RepInExt2.flags = 1|XCL_MEM_TOPOLOGY;
-
-    RepoutExt.obj = ind_o_out.data();
-    RepoutExt.param = 0;
-    RepoutExt.flags = 1|XCL_MEM_TOPOLOGY;
-
-    printf("flags set\n");
-
-
-
-  
+    // ------------------------------------------------------------------------------------
+    // Step 2: Create buffers and initialize test values
+    // ------------------------------------------------------------------------------------
     // Create the buffers and allocate memory
-    cl::Buffer inq1_buf(context, CL_MEM_USE_HOST_PTR|CL_MEM_READ_ONLY|CL_MEM_EXT_PTR_XILINX, sizeof(float) * L1_pi * BATCHS, &InqExt1, &err);
-    cl::Buffer inq2_buf(context, CL_MEM_USE_HOST_PTR|CL_MEM_READ_ONLY|CL_MEM_EXT_PTR_XILINX, sizeof(float) * L1_pi * BATCHS, &InqExt2, &err);
-    cl::Buffer inq3_buf(context, CL_MEM_USE_HOST_PTR|CL_MEM_READ_ONLY|CL_MEM_EXT_PTR_XILINX, sizeof(float) * BATCHS, &InqExt3, &err);
-    cl::Buffer inq4_buf(context, CL_MEM_USE_HOST_PTR|CL_MEM_READ_ONLY|CL_MEM_EXT_PTR_XILINX, sizeof(float) * BATCHS, &InqExt4, &err);
-    cl::Buffer inq5_buf(context, CL_MEM_USE_HOST_PTR|CL_MEM_READ_ONLY|CL_MEM_EXT_PTR_XILINX, sizeof(int) * BATCHS, &InqExt5, &err);
-    cl::Buffer outq1_buf(context, CL_MEM_USE_HOST_PTR|CL_MEM_WRITE_ONLY|CL_MEM_EXT_PTR_XILINX, sizeof(float) * BATCHS, &OutqExt1, &err);
-    cl::Buffer outq2_buf(context, CL_MEM_USE_HOST_PTR|CL_MEM_WRITE_ONLY|CL_MEM_EXT_PTR_XILINX, sizeof(float) * BATCHS, &OutqExt2, &err);
-// std::cout << sizeof(actvec) * BATCHS << std::endl;
-    cl::Buffer inpi1_buf(context, CL_MEM_USE_HOST_PTR|CL_MEM_READ_ONLY|CL_MEM_EXT_PTR_XILINX, sizeof(float) * L1_pi * BATCHS, &InpiExt1, &err);
-    cl::Buffer outpi2_buf(context, CL_MEM_USE_HOST_PTR|CL_MEM_WRITE_ONLY|CL_MEM_EXT_PTR_XILINX, sizeof(w1blockvec) * L1_pi, &OutpiExt2, &err);
-    cl::Buffer outpi3_buf(context, CL_MEM_USE_HOST_PTR|CL_MEM_WRITE_ONLY|CL_MEM_EXT_PTR_XILINX, sizeof(Piw2blockvec) * L2, &OutpiExt3, &err);
-    cl::Buffer outpi4_buf(context, CL_MEM_USE_HOST_PTR|CL_MEM_WRITE_ONLY|CL_MEM_EXT_PTR_XILINX, sizeof(float) * L2, &OutpiExt1, &err);
-    cl::Buffer outpi5_buf(context, CL_MEM_USE_HOST_PTR|CL_MEM_WRITE_ONLY|CL_MEM_EXT_PTR_XILINX, sizeof(float) * L3_pi, &OutpiExt2, &err);
+    cl::Buffer inMap_buf(context, CL_MEM_READ_ONLY, sizeof(dtype) * INMAP_H * INMAP_W, NULL, &err);
+    cl::Buffer knl_buf(context, CL_MEM_READ_ONLY, sizeof(dtype) * K_H * K_W * CIN * COUT, NULL, &err);
+    cl::Buffer outMap_buf(context, CL_MEM_WRITE_ONLY, sizeof(dtype) * FMAPO_H * FMAPO_W * COUT, NULL, &err);
 
-    printf("Learners buffers allocated\n");
+    // Map buffers to kernel arguments, thereby assigning them to specific device memory banks
+    krnl_matrix_mult.setArg(0, inMap_buf);
+    krnl_matrix_mult.setArg(1, knl_buf);
+    krnl_matrix_mult.setArg(2, outMap_buf);
 
-    // Top_tree(int insert_signal,int *insert_ind,float *init_priority, int update_signal, hls::stream<ap_axiu<32,0,0,0>> &pn_in,int sample_signal,int *ind_o)
-    int insert_signal_in;
-    int update_signal;
-    int sample_signal;
-    cl::Buffer insind_buf(context, CL_MEM_USE_HOST_PTR|CL_MEM_READ_ONLY|CL_MEM_EXT_PTR_XILINX, sizeof(int) * insert_batch, &RepInExt1, &err);
-    cl::Buffer inpn_buf(context, CL_MEM_USE_HOST_PTR|CL_MEM_READ_ONLY|CL_MEM_EXT_PTR_XILINX, sizeof(float) * insert_batch, &RepInExt2, &err);
-    cl::Buffer out_buf(context, CL_MEM_USE_HOST_PTR|CL_MEM_WRITE_ONLY|CL_MEM_EXT_PTR_XILINX, sizeof(int) * N_learner, &RepoutExt, &err);
-    printf("Replay buffers allocated\n");
+    // Map host-side buffer memory to user-space pointers
+    dtype *inMap = (dtype *)q.enqueueMapBuffer(inMap_buf, CL_TRUE, CL_MAP_WRITE, 0, sizeof(dtype) * INMAP_H * INMAP_W);
+    dtype *knl = (dtype *)q.enqueueMapBuffer(knl_buf, CL_TRUE, CL_MAP_WRITE, 0, sizeof(dtype) * K_H * K_W * CIN * COUT);
+    dtype *outMap = (dtype *)q.enqueueMapBuffer(outMap_buf, CL_TRUE, CL_MAP_WRITE | CL_MAP_READ, 0, sizeof(dtype) * FMAPO_H * FMAPO_W * COUT);
 
-
-
-    OCL_CHECK(err,cl::Kernel krnl_topQ(program, "learnersQ_top:{topq_1}", &err));
-    cl::Kernel krnl_tree3(program, "Top_tree", &err); // ===================Replay Update (Parallel with train):
-    float gamma=0.5;
-    float alpha=0.1;
-    int Qwsync = 0;
-    int Piwsync = 0;
-    OCL_CHECK(err, err =krnl_topQ.setArg(0, inq1_buf));
-    OCL_CHECK(err, err =krnl_topQ.setArg(1, inq2_buf));
-    OCL_CHECK(err, err =krnl_topQ.setArg(2, inq3_buf));
-    OCL_CHECK(err, err =krnl_topQ.setArg(3, inq4_buf));
-    OCL_CHECK(err, err =krnl_topQ.setArg(4, gamma));
-    OCL_CHECK(err, err =krnl_topQ.setArg(5, alpha));
-    OCL_CHECK(err, err =krnl_topQ.setArg(6, inq5_buf));
-    OCL_CHECK(err, err =krnl_topQ.setArg(15, Qwsync));
-    OCL_CHECK(err, err =krnl_topQ.setArg(16, Piwsync));
-    OCL_CHECK(err, err =krnl_topQ.setArg(17, outq1_buf)); //Logging Qs  float*BATCHS*BSIZE
-    OCL_CHECK(err, err =krnl_topQ.setArg(18, outq2_buf)); //Logging Loss  float*BATCHS*BSIZE
-
-    // insert_signal_in = 0;
-    // update_signal=1;
-    // sample_signal = 0;
-    // krnl_tree3.setArg(0, insert_signal_in);
-    // krnl_tree3.setArg(1, insind_buf);
-    // krnl_tree3.setArg(2, inpn_buf);
-    // krnl_tree3.setArg(3, update_signal);
-    // krnl_tree3.setArg(5, sample_signal);
-    // krnl_tree3.setArg(6, out_buf);
-    
-    q.enqueueMigrateMemObjects({inq1_buf,inq2_buf,inq3_buf,inq4_buf,inq5_buf}, 0 /* 0 means from host*/);
-    // q.enqueueMigrateMemObjects({insind_buf}, 0 /* 0 means from host*/);
-    // q.enqueueMigrateMemObjects({inpn_buf}, 0 /* 0 means from host*/);
-    q.finish();
-    q.enqueueTask(krnl_topQ);
-    // q.enqueueTask(krnl_tree3);
-    q.finish();
-    q.enqueueMigrateMemObjects({outq1_buf,outq2_buf}, CL_MIGRATE_MEM_OBJECT_HOST);
-    q.finish(); 
-    printf("q.finish\n");
-
-    printf("============================================================================\n");
-    printf("================= DATA BACK TO HOST: Learners Train round 1 ================\n");
-    printf("============================================================================\n");
-    
-
-    printf("\nQs content:\n");
-    for(int i = 0; i < BATCHS; i++) {
-        printf("%.8f ",Out_Q[i]);
+    // Initialize the vectors used in the test
+    for (int i=0; i< INMAP_H * INMAP_W; ++i){
+        inMap[i] = rand() % (INMAP_H * INMAP_W);
     }
-    printf("\n"); 
-    printf("\nLoss content:\n");
-    for(int i = 0; i < BATCHS; i++) {
-        printf("%.8f ",Out_Loss[i]);
+
+    int count = 0;
+    std::cout << "---------------\nInput Feature Map\n";
+    for (int i=0; i<INMAP_H; ++i){
+        for (int j=0; j<INMAP_W; ++j){
+            std::cout << inMap[count] << " ";
+            ++count;
+        }
+        std::cout << "\n";
     }
-    printf("\n"); 
+
+    for (int i=0; i<K_H * K_W * CIN * COUT; ++i){
+        knl[i] = 1;
+    }
+
+    count = 0;
+    std::cout << "---------------\nKernel\n";
+    for (int i=0; i<COUT*CIN; ++i){
+        std::cout << "Kernel " << i << "\n";
+        for (int j=0; j<K_H; ++j){
+            for (int k=0; k<K_W; ++k){
+                // std::cout << knl[count] << " ";
+                // ++count;
+            }
+            std::cout << "\n";
+        }
+    }
+
+    for (int i=0; i<FMAPO_H * FMAPO_W * COUT; ++i){
+        outMap[i] = 0;
+    }
 
 
+    // ------------------------------------------------------------------------------------
+    // Step 3: Run the kernel
+    // ------------------------------------------------------------------------------------
+    // Set kernel arguments
+    krnl_matrix_mult.setArg(0, inMap_buf);
+    krnl_matrix_mult.setArg(1, knl_buf);
+    krnl_matrix_mult.setArg(2, outMap_buf);
+    krnl_matrix_mult.setArg(3, 0); //alg_last
+    krnl_matrix_mult.setArg(4, 0); //alg_current
+    krnl_matrix_mult.setArg(5, 0); //alg_next
 
-  return 0;
 
+    // Schedule transfer of inputs to device memory, execution of kernel, and transfer of outputs back to host memory
+    q.enqueueMigrateMemObjects({inMap_buf, knl_buf}, 0 /* 0 means from host*/);
+    q.enqueueTask(krnl_matrix_mult);
+    q.enqueueMigrateMemObjects({outMap_buf}, CL_MIGRATE_MEM_OBJECT_HOST);
 
+    // Wait for all scheduled operations to finish
+    q.finish();
+
+    // ------------------------------------------------------------------------------------
+    // Step 4: Check Results and Release Allocated Resources
+    // ------------------------------------------------------------------------------------
+    bool match = false;
+    // for (int i = 0; i < FMAPO_H * FMAPO_W ; i++)
+    // {
+    //     int expected = in1[i] + in2[i];
+    //     if (out[i] != expected)
+    //     {
+    //         std::cout << "Error: Result mismatch" << std::endl;
+    //         std::cout << "i = " << i << " CPU result = " << expected << " Device result = " << out[i] << std::endl;
+    //         match = false;
+    //         break;
+    //     }
+    // }
+    std::cout << "--------------\nOutput Feature Map\n";
+    count = 0;
+    for (int i=0; i<COUT; ++i){
+        std::cout << "OFM " << i << "\n";
+        for (int j=0; j<FMAPO_H; ++j){
+            for (int k=0; k<FMAPO_W; ++k){
+                std::cout << outMap[count] << " ";
+                ++count;
+            }
+            std::cout << "\n";
+        }
+    }
+
+    delete[] fileBuf;
+
+    std::cout << "TEST " << (match ? "PASSED" : "FAILED") << std::endl;
+    return (match ? EXIT_SUCCESS : EXIT_FAILURE);
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-namespace xcl {
-
-std::vector<cl::Device> get_xilinx_devices() 
+// ------------------------------------------------------------------------------------
+// Utility functions
+// ------------------------------------------------------------------------------------
+std::vector<cl::Device> get_xilinx_devices()
 {
     size_t i;
     cl_int err;
     std::vector<cl::Platform> platforms;
     err = cl::Platform::get(&platforms);
     cl::Platform platform;
-    for (i  = 0 ; i < platforms.size(); i++){
+    for (i = 0; i < platforms.size(); i++)
+    {
         platform = platforms[i];
         std::string platformName = platform.getInfo<CL_PLATFORM_NAME>(&err);
-        if (platformName == "Xilinx"){
+        if (platformName == "Xilinx")
+        {
             std::cout << "INFO: Found Xilinx Platform" << std::endl;
             break;
         }
     }
-    if (i == platforms.size()) {
+    if (i == platforms.size())
+    {
         std::cout << "ERROR: Failed to find Xilinx platform" << std::endl;
         exit(EXIT_FAILURE);
     }
-   
-    //Getting ACCELERATOR Devices and selecting 1st such device 
+
+    //Getting ACCELERATOR Devices and selecting 1st such device
     std::vector<cl::Device> devices;
     err = platform.getDevices(CL_DEVICE_TYPE_ACCELERATOR, &devices);
     return devices;
 }
-   
-char* read_binary_file(const std::string &xclbin_file_name, unsigned &nb) 
+
+char *read_binary_file(const std::string &xclbin_file_name, unsigned &nb)
 {
-    if(access(xclbin_file_name.c_str(), R_OK) != 0) {
+    if (access(xclbin_file_name.c_str(), R_OK) != 0)
+    {
         printf("ERROR: %s xclbin not available please build\n", xclbin_file_name.c_str());
         exit(EXIT_FAILURE);
     }
-    //Loading XCL Bin into char buffer 
+    //Loading XCL Bin into char buffer
     std::cout << "INFO: Loading '" << xclbin_file_name << "'\n";
     std::ifstream bin_file(xclbin_file_name.c_str(), std::ifstream::binary);
-    bin_file.seekg (0, bin_file.end);
+    bin_file.seekg(0, bin_file.end);
     nb = bin_file.tellg();
-    bin_file.seekg (0, bin_file.beg);
-    char *buf = new char [nb];
+    bin_file.seekg(0, bin_file.beg);
+    char *buf = new char[nb];
     bin_file.read(buf, nb);
     return buf;
-}
-
-
 }

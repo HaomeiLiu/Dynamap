@@ -8,7 +8,7 @@
 #define K_H 1
 #define K_W 1
 #define K_BOUND K_H*K_W
-#define COUT 128
+#define COUT 3
 #define INMAP_H 16
 #define INMAP_W 16
 #define FMAPO_H INMAP_H/STRIDE

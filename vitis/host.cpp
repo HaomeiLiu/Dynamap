@@ -13,7 +13,6 @@
 #include <CL/cl2.hpp>
 #include "ap_int.h"
 
-
 #include "mmkernel.h"
 
 typedef ap_int<16> dtype;
@@ -24,7 +23,7 @@ typedef ap_int<16> dtype;
 #define K_H 1
 #define K_W 1
 #define K_BOUND K_H*K_W
-#define COUT 128
+#define COUT 3
 #define INMAP_H 16
 #define INMAP_W 16
 #define FMAPO_H INMAP_H/STRIDE
@@ -81,6 +80,7 @@ int main(int argc, char **argv)
     krnl_matrix_mult.setArg(1, knl_buf);
     krnl_matrix_mult.setArg(2, outMap_buf);
 
+
     // Map host-side buffer memory to user-space pointers
     dtype *inMap = (dtype *)q.enqueueMapBuffer(inMap_buf, CL_TRUE, CL_MAP_WRITE, 0, sizeof(dtype) * INMAP_H * INMAP_W);
     dtype *knl = (dtype *)q.enqueueMapBuffer(knl_buf, CL_TRUE, CL_MAP_WRITE, 0, sizeof(dtype) * K_H * K_W * CIN * COUT);
@@ -88,7 +88,7 @@ int main(int argc, char **argv)
 
     // Initialize the vectors used in the test
     for (int i=0; i< INMAP_H * INMAP_W; ++i){
-        inMap[i] = rand() % (INMAP_H * INMAP_W);
+        inMap[i] = i % (INMAP_H * INMAP_W);
     }
 
     int count = 0;
